@@ -22,3 +22,5 @@ require (
 	golang.org/x/sys v0.47.0 // indirect
 	golang.org/x/text v0.40.0 // indirect
 )
+
+replace github.com/apernet/quic-go => github.com/Canda15/quic-go v0.62.1-xmod.2

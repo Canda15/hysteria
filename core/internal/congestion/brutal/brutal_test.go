@@ -43,3 +43,42 @@ func TestBrutalLossCompensation(t *testing.T) {
 		})
 	}
 }
+
+func TestBrutalSpuriousLossCorrection(t *testing.T) {
+	b := NewBrutalSender(1000000, false)
+	acked := make([]congestion.AckedPacketInfo, 80)
+	lost := make([]congestion.LostPacketInfo, 50)
+	b.OnCongestionEventEx(0, monotime.Time(5*time.Second), acked, lost)
+	if b.ackRate != minAckRate {
+		t.Fatalf("ackRate = %v, want %v (clamped)", b.ackRate, minAckRate)
+	}
+
+	// 40 of the losses turn out to be spurious: retracting them lifts the ack
+	// rate back above the clamp threshold (80 acked / 10 real losses).
+	b.OnSpuriousLoss(40)
+	b.updateAckRate(5)
+	if want := 80.0 / 90.0; b.ackRate != want {
+		t.Errorf("ackRate = %v, want %v", b.ackRate, want)
+	}
+	if b.spuriousCredit != 0 {
+		t.Errorf("spuriousCredit = %d, want 0 (fully consumed)", b.spuriousCredit)
+	}
+
+	// Credit that exceeds the losses currently in the window is kept for
+	// future retraction instead of being dropped.
+	b.OnSpuriousLoss(60)
+	b.updateAckRate(5)
+	if b.ackRate != 1.0 {
+		t.Errorf("ackRate = %v, want 1.0 (no real losses left)", b.ackRate)
+	}
+	if b.spuriousCredit != 10 {
+		t.Errorf("spuriousCredit = %d, want 10", b.spuriousCredit)
+	}
+
+	// With loss compensation disabled, spurious losses are not tracked at all.
+	b2 := NewBrutalSender(1000000, true)
+	b2.OnSpuriousLoss(40)
+	if b2.spuriousCredit != 0 {
+		t.Errorf("spuriousCredit = %d, want 0 (compensation disabled)", b2.spuriousCredit)
+	}
+}

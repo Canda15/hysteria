@@ -22,7 +22,8 @@ const (
 	debugPrintInterval = 2
 )
 
-var _ congestion.CongestionControl = &BrutalSender{}
+var _ congestion.CongestionControlEx = &BrutalSender{}
+var _ congestion.SpuriousLossObserver = &BrutalSender{}
 
 type BrutalSender struct {
 	rttStats        congestion.RTTStatsProvider
@@ -32,6 +33,11 @@ type BrutalSender struct {
 
 	pktInfoSlots [pktInfoSlotCount]pktInfo
 	ackRate      float64
+
+	// Losses that turned out to be spurious (packets declared lost due to
+	// reordering, but acknowledged by the peer afterwards), pending retraction
+	// in updateAckRate.
+	spuriousCredit uint64
 
 	disableLossCompensation bool
 
@@ -121,6 +127,22 @@ func (b *BrutalSender) OnCongestionEventEx(priorInFlight congestion.ByteCount, e
 	b.updateAckRate(currentTimestamp)
 }
 
+// OnSpuriousLoss implements the optional congestion.SpuriousLossObserver
+// interface. It is called for packets that were reported as lost but turned out
+// to have been merely reordered: their ACK arrived after they were declared
+// lost. Those losses are retracted in updateAckRate, so that reordering
+// artifacts don't trigger loss compensation for losses that never happened.
+// The correction takes effect when the ack rate is next recomputed.
+func (b *BrutalSender) OnSpuriousLoss(count int) {
+	if count <= 0 || b.disableLossCompensation {
+		return
+	}
+	b.spuriousCredit += uint64(count)
+	if b.debug {
+		b.debugPrint("spurious loss: %d (pending correction: %d)", count, b.spuriousCredit)
+	}
+}
+
 func (b *BrutalSender) SetMaxDatagramSize(size congestion.ByteCount) {
 	b.maxDatagramSize = size
 	b.pacer.SetMaxDatagramSize(size)
@@ -142,6 +164,14 @@ func (b *BrutalSender) updateAckRate(currentTimestamp int64) {
 		}
 		ackCount += info.AckCount
 		lossCount += info.LossCount
+	}
+	// Retract spurious losses: packets counted as lost that were in fact only
+	// reordered. Leftover credit is kept for future retraction, so that
+	// corrections arriving after their losses aged out of the sampling window
+	// are not silently dropped.
+	if credit := min(b.spuriousCredit, lossCount); credit > 0 {
+		b.spuriousCredit -= credit
+		lossCount -= credit
 	}
 	if ackCount+lossCount < minSampleCount {
 		b.ackRate = 1

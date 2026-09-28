@@ -45,3 +45,5 @@ require (
 )
 
 replace github.com/apernet/hysteria/core/v2 => ../core
+
+replace github.com/apernet/quic-go => github.com/Canda15/quic-go v0.62.1-xmod.2
