@@ -63,7 +63,10 @@ func TestUDPSniffResourceBounds(t *testing.T) {
 	conn := &stubUDPConn{}
 	io := &stubSniffIO{conn: conn}
 	e := newUDPSessionEntry(1, io,
-		func(addr string, data []byte) (UDPConn, string, error) { return io.UDP(addr) },
+		func(addr string, data []byte) (UDPConn, string, error) {
+			conn, err := io.UDP(addr)
+			return conn, addr, err
+		},
 		func(error) {},
 	)
 

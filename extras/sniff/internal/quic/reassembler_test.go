@@ -68,7 +68,8 @@ func encryptInitial(t *testing.T, version uint32, dcid []byte, pn int64, frames 
 	require.NotNil(t, spec)
 	secret := hkdf.Extract(crypto.SHA256.New, dcid, spec.salt)
 	clientSecret := hkdfExpandLabel(crypto.SHA256.New, secret, "client in", []byte{}, crypto.SHA256.Size())
-	pk := NewInitialProtectionKey(clientSecret, spec.version)
+	pk, err := NewInitialProtectionKey(clientSecret, spec.version)
+	require.NoError(t, err)
 
 	hdr := []byte{0x80 | 0x40 | spec.initialType<<4}
 	hdr = binary.BigEndian.AppendUint32(hdr, version)
