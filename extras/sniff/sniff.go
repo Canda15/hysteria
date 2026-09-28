@@ -156,6 +156,8 @@ func (h *Sniffer) TCP(stream server.HyStream, reqAddr *string) ([]byte, error) {
 	}
 }
 
+// UDP is the legacy one-shot UDP sniffing hook, kept for RequestHook
+// interface compatibility. See UDPStream for the stateful version.
 func (h *Sniffer) UDP(data []byte, reqAddr *string) error {
 	pl, err := quicInternal.ReadCryptoPayload(data)
 	if err != nil || len(pl) < 4 || pl[0] != 0x01 {
@@ -172,6 +174,82 @@ func (h *Sniffer) UDP(data []byte, reqAddr *string) error {
 	}
 	return nil
 }
+
+var _ server.UDPStreamHook = (*Sniffer)(nil)
+
+// UDPStream implements server.UDPStreamHook. It opens a stateful sniffing
+// session that reassembles the QUIC ClientHello from possibly multiple
+// Initial packets spread across multiple datagrams.
+func (h *Sniffer) UDPStream(firstData []byte, reqAddr *string) (server.UDPsniffSession, bool) {
+	timeout := h.Timeout
+	if timeout == 0 {
+		timeout = sniffDefaultTimeout
+	}
+	s := &udpSniffSession{
+		r:        quicInternal.NewClientHelloReassembler(),
+		deadline: time.Now().Add(timeout),
+		reqAddr:  *reqAddr,
+		addr:     *reqAddr, // valid before the decision: the original address
+	}
+	s.Feed(firstData)
+	return s, s.done
+}
+
+// udpSniffSession is a stateful UDP sniffing session that reassembles the
+// QUIC ClientHello of one UDP session from possibly multiple Initial packets.
+type udpSniffSession struct {
+	r        *quicInternal.ClientHelloReassembler
+	deadline time.Time
+	reqAddr  string
+	done     bool
+	addr     string
+}
+
+// Feed feeds a datagram to the sniffing session.
+func (s *udpSniffSession) Feed(data []byte) {
+	if s.done {
+		return
+	}
+	if time.Now().After(s.deadline) {
+		// Timed out: give up sniffing and keep the original address.
+		s.finish("")
+		return
+	}
+	done, ch := s.r.Feed(data)
+	if !done {
+		return
+	}
+	if ch == nil {
+		// Not a sniffable QUIC ClientHello session.
+		s.finish("")
+		return
+	}
+	clientHello := utls.UnmarshalClientHello(ch)
+	if clientHello == nil || clientHello.ServerName == "" {
+		// Complete ClientHello but no server name — nothing to rewrite.
+		s.finish("")
+		return
+	}
+	s.finish(clientHello.ServerName)
+}
+
+func (s *udpSniffSession) finish(sni string) {
+	s.done = true
+	if sni == "" {
+		s.addr = s.reqAddr
+		return
+	}
+	_, port, err := net.SplitHostPort(s.reqAddr)
+	if err != nil {
+		s.addr = s.reqAddr
+		return
+	}
+	s.addr = net.JoinHostPort(sni, port)
+}
+
+func (s *udpSniffSession) Done() bool { return s.done }
+
+func (s *udpSniffSession) Addr() string { return s.addr }
 
 type teeReader struct {
 	Stream server.HyStream

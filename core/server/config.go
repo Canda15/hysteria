@@ -154,6 +154,32 @@ type RequestHook interface {
 	UDP(data []byte, reqAddr *string) error
 }
 
+// UDPStreamHook is an optional extension of RequestHook for stateful
+// multi-datagram UDP sniffing. If the RequestHook implements this interface,
+// the session manager opens a sniffing session with the first datagram of
+// each sniff-eligible UDP session and feeds subsequent datagrams to it until
+// a decision is made; the one-shot UDP hook is skipped for such sessions.
+// This allows reassembling e.g. a QUIC ClientHello that spans multiple
+// Initial packets across multiple datagrams.
+type UDPStreamHook interface {
+	// OpenUDPStream opens a sniffing session with the first datagram of a UDP
+	// session. If the returned session is not yet Done, the caller feeds
+	// subsequent datagrams until it is. Once Done, Addr returns the sniffed
+	// target address (or the original one if sniffing found no server name).
+	OpenUDPStream(firstData []byte, reqAddr string) UDPsniffSession
+}
+
+// UDPsniffSession is a stateful UDP sniffing session, see UDPStreamHook.
+type UDPsniffSession interface {
+	// Feed feeds a datagram to the sniffing session.
+	Feed(data []byte)
+	// Done reports whether the sniffing decision has been made.
+	Done() bool
+	// Addr returns the decided target address. Only meaningful once Done
+	// returns true.
+	Addr() string
+}
+
 // Outbound provides the implementation of how the server should connect to remote servers.
 // Although UDP includes a reqAddr, the implementation does not necessarily have to use it
 // to make a "connected" UDP connection that does not accept packets from other addresses.

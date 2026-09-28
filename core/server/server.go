@@ -414,6 +414,22 @@ func (io *udpIOImpl) Hook(data []byte, reqAddr *string) error {
 	}
 }
 
+// OpenUDPStream opens a stateful UDP sniffing session via the RequestHook,
+// if it supports it (see UDPStreamHook). Returns nil if the hook does not
+// support stateful sniffing or the session is not sniff-eligible.
+func (io *udpIOImpl) OpenUDPStream(firstData []byte, reqAddr string) UDPsniffSession {
+	if io.RequestHook == nil {
+		return nil
+	}
+	if !io.RequestHook.Check(true, reqAddr) {
+		return nil
+	}
+	if sh, ok := io.RequestHook.(UDPStreamHook); ok {
+		return sh.OpenUDPStream(firstData, reqAddr)
+	}
+	return nil
+}
+
 func (io *udpIOImpl) UDP(reqAddr string) (UDPConn, error) {
 	return io.Outbound.UDP(reqAddr)
 }

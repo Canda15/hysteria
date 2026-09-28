@@ -16,6 +16,15 @@ import (
 const (
 	idleCleanupInterval = 1 * time.Second
 	maxSessionACLCache  = 256
+
+	// Bounds for stateful UDP sniffing of a session's initial flight. When
+	// any of them is hit before the sniffer reaches a decision, sniffing is
+	// abandoned and the session is dialed with the original address. Normal
+	// QUIC initial flights arrive back-to-back within milliseconds, so these
+	// caps only bound the damage from pathological or malicious traffic.
+	udpSniffMaxDatagrams = 8
+	udpSniffMaxBytes     = 64 * 1024
+	udpSniffTimeout      = 500 * time.Millisecond
 )
 
 type udpIO interface {
@@ -24,6 +33,12 @@ type udpIO interface {
 	Hook(data []byte, reqAddr *string) error
 	UDP(reqAddr string) (UDPConn, error)
 	CheckUDP(reqAddr string) error
+}
+
+// udpStreamHookCap is implemented by udpIO implementations that support
+// stateful UDP sniffing (see UDPStreamHook).
+type udpStreamHookCap interface {
+	OpenUDPStream(firstData []byte, reqAddr string) UDPsniffSession
 }
 
 type udpEventLogger interface {
@@ -47,6 +62,11 @@ type udpSessionEntry struct {
 	closed   bool
 
 	aclCache map[string]error
+
+	sniffSession UDPsniffSession          // non-nil while sniffing is in progress
+	pending      []*protocol.UDPMessage // messages buffered during sniffing
+	pendingBytes int                    // total size of the buffered datagrams
+	sniffDeadline time.Time             // when to give up sniffing this session
 }
 
 func newUDPSessionEntry(
@@ -93,11 +113,59 @@ func (e *udpSessionEntry) CloseWithErr(err error) {
 // the message is written to the session's UDP connection, and the number of bytes
 // written is returned.
 // Otherwise, 0 and nil are returned.
+//
+// If the IO supports stateful UDP sniffing (see udpStreamHookCap), messages of
+// sniff-eligible sessions are buffered until the sniffing decision is made
+// (e.g. a QUIC ClientHello has been reassembled across datagrams), then
+// flushed in order to the decided address.
 func (e *udpSessionEntry) Feed(msg *protocol.UDPMessage) (int, error) {
 	e.Last.Set(time.Now())
 	dfMsg := e.D.Feed(msg)
 	if dfMsg == nil {
 		return 0, nil
+	}
+
+	if e.sniffSession != nil {
+		// Sniffing in progress: feed the datagram to the sniffer and buffer
+		// the message. The buffered messages are flushed in order once the
+		// sniffing decision is made, or when one of the resource bounds
+		// (datagram count, total size, deadline) is hit.
+		e.sniffSession.Feed(dfMsg.Data)
+		e.pending = append(e.pending, dfMsg)
+		e.pendingBytes += len(dfMsg.Data)
+		if !e.sniffSession.Done() &&
+			len(e.pending) < udpSniffMaxDatagrams &&
+			e.pendingBytes < udpSniffMaxBytes &&
+			time.Now().Before(e.sniffDeadline) {
+			return 0, nil
+		}
+		return e.decideAndFlush()
+	}
+
+	if e.conn == nil {
+		// First complete message of the session: try to open a stateful
+		// sniffing session, if the IO supports it.
+		if capHook, ok := e.IO.(udpStreamHookCap); ok {
+			if sess := capHook.OpenUDPStream(dfMsg.Data, dfMsg.Addr); sess != nil {
+				if sess.Done() {
+					// The sniffing decision is already final (e.g. the whole
+					// ClientHello fit into this datagram): dial immediately.
+					firstMsg := *dfMsg
+					firstMsg.Addr = sess.Addr()
+					e.applySniffedAddr(dfMsg.Addr, firstMsg.Addr)
+					if err := e.initConn(&firstMsg); err != nil {
+						return 0, err
+					}
+					return e.writeMessage(dfMsg)
+				}
+				// Need more datagrams before the decision can be made.
+				e.sniffSession = sess
+				e.sniffDeadline = time.Now().Add(udpSniffTimeout)
+				e.pending = append(e.pending, dfMsg)
+				e.pendingBytes = len(dfMsg.Data)
+				return 0, nil
+			}
+		}
 	}
 
 	if e.conn == nil {
@@ -110,13 +178,55 @@ func (e *udpSessionEntry) Feed(msg *protocol.UDPMessage) (int, error) {
 		}
 	}
 
+	return e.writeMessage(dfMsg)
+}
+
+// decideAndFlush finalizes the sniffing decision, initializes the outbound
+// connection with the decided address and flushes the buffered messages.
+func (e *udpSessionEntry) decideAndFlush() (int, error) {
+	addr := e.sniffSession.Addr()
+	e.sniffSession = nil
+	firstMsg := *e.pending[0]
+	originalAddr := firstMsg.Addr
+	firstMsg.Addr = addr
+	e.applySniffedAddr(originalAddr, addr)
+	if err := e.initConn(&firstMsg); err != nil {
+		e.pending = nil
+		return 0, err
+	}
+	total := 0
+	for _, m := range e.pending {
+		n, err := e.writeMessage(m)
+		total += n
+		if err != nil {
+			e.pending = nil
+			return total, err
+		}
+	}
+	e.pending = nil
+	return total, nil
+}
+
+// applySniffedAddr makes the sniffed address override the original one for
+// the whole session, so that return traffic uses the address the client
+// originally sent to. Must be called before initConn, which starts the
+// receive loop that reads these fields.
+func (e *udpSessionEntry) applySniffedAddr(originalAddr, sniffedAddr string) {
+	if sniffedAddr != originalAddr {
+		e.OverrideAddr = sniffedAddr
+		e.OriginalAddr = originalAddr
+	}
+}
+
+// writeMessage writes a complete message to the session's UDP connection,
+// applying the address override and outbound ACL policy.
+func (e *udpSessionEntry) writeMessage(dfMsg *protocol.UDPMessage) (int, error) {
 	addr := dfMsg.Addr
 	if e.OverrideAddr != "" {
 		addr = e.OverrideAddr
 	} else if err := e.checkAddr(addr); err != nil {
 		return 0, err
 	}
-
 	return e.conn.WriteTo(dfMsg.Data, addr)
 }
 

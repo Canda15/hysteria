@@ -44,7 +44,11 @@ func ReadCryptoPayload(packet []byte) ([]byte, error) {
 	if int64(len(packet)) < offset+hdr.Length {
 		return nil, fmt.Errorf("packet is too short: %d < %d", len(packet), offset+hdr.Length)
 	}
-	unProtectedPayload, err := pp.UnProtect(packet[:offset+hdr.Length], offset, 2)
+	// UnProtect modifies the packet in place (header protection removal and
+	// in-place decryption), so it must operate on a copy — the caller may
+	// still need to forward the original datagram afterwards.
+	pkt := bytes.Clone(packet[:offset+hdr.Length])
+	unProtectedPayload, err := pp.UnProtect(pkt, offset, 2)
 	if err != nil {
 		return nil, err
 	}

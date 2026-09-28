@@ -44,8 +44,14 @@ type PacketProtector struct {
 
 // UnProtect decrypts a QUIC packet.
 func (pp *PacketProtector) UnProtect(packet []byte, pnOffset, pnMax int64) ([]byte, error) {
+	payload, _, err := pp.UnProtectPN(packet, pnOffset, pnMax)
+	return payload, err
+}
+
+// UnProtectPN is like UnProtect, but also returns the decoded packet number.
+func (pp *PacketProtector) UnProtectPN(packet []byte, pnOffset, pnMax int64) ([]byte, int64, error) {
 	if isLongHeader(packet[0]) && int64(len(packet)) < pnOffset+4+16 {
-		return nil, errors.New("packet with long header is too small")
+		return nil, 0, errors.New("packet with long header is too small")
 	}
 
 	// https://www.rfc-editor.org/rfc/rfc9001.html#name-header-protection-sample
@@ -73,9 +79,9 @@ func (pp *PacketProtector) UnProtect(packet []byte, pnOffset, pnMax int64) ([]by
 	payload := packet[pnOffset:][pnLen:]
 	dec, err := pp.key.aead.Open(payload[:0], pp.key.nonce(pn), payload, hdr)
 	if err != nil {
-		return nil, fmt.Errorf("decryption failed: %w", err)
+		return nil, 0, fmt.Errorf("decryption failed: %w", err)
 	}
-	return dec, nil
+	return dec, pn, nil
 }
 
 // ProtectionKey is the key used to protect a QUIC packet.
