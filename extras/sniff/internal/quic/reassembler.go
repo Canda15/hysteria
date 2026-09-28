@@ -6,7 +6,6 @@ import (
 	"encoding/binary"
 	"errors"
 
-	"github.com/apernet/quic-go/quicvarint"
 	"golang.org/x/crypto/hkdf"
 )
 
@@ -241,16 +240,15 @@ func (r *ClientHelloReassembler) collectCrypto(payload []byte) error {
 		switch frameType {
 		case 0x00, 0x01: // PADDING, PING
 		case 0x02, 0x03: // ACK, ACK with ECN
-			var v uint64
 			var n int
 			var ok bool
 			// Largest Acknowledged
-			if v, n, ok = readReasmVarint(payload); !ok {
+			if _, n, ok = readReasmVarint(payload); !ok {
 				return errReasmMalformed
 			}
 			payload = payload[n:]
 			// ACK Delay
-			if v, n, ok = readReasmVarint(payload); !ok {
+			if _, n, ok = readReasmVarint(payload); !ok {
 				return errReasmMalformed
 			}
 			payload = payload[n:]
@@ -261,7 +259,7 @@ func (r *ClientHelloReassembler) collectCrypto(payload []byte) error {
 			}
 			payload = payload[n:]
 			// First ACK Range
-			if v, n, ok = readReasmVarint(payload); !ok {
+			if _, n, ok = readReasmVarint(payload); !ok {
 				return errReasmMalformed
 			}
 			payload = payload[n:]
@@ -303,7 +301,8 @@ func (r *ClientHelloReassembler) collectCrypto(payload []byte) error {
 		case 0x1c: // CONNECTION_CLOSE, only 0x1c is permitted in Initial packets
 			// Error Code, Frame Type, Reason Phrase Length
 			for i := 0; i < 3; i++ {
-				if _, n, ok := readReasmVarint(payload); !ok {
+				_, n, ok := readReasmVarint(payload)
+				if !ok {
 					return errReasmMalformed
 				}
 				payload = payload[n:]
@@ -330,7 +329,7 @@ func (r *ClientHelloReassembler) collectCrypto(payload []byte) error {
 // tracking exact byte coverage across out-of-order, overlapping or duplicated
 // fragments.
 func (r *ClientHelloReassembler) addCrypto(offset uint64, data []byte) {
-	if len(data) == 0 || offset+uint64(len(data)) > reasmMaxCryptoData {
+	if len(data) == 0 || offset+uint64(len(data)) > ReasmMaxCryptoData {
 		// Oversized fragments are ignored — a real ClientHello never gets
 		// even close to the cap, and exceeding it is grounds for giving up.
 		return

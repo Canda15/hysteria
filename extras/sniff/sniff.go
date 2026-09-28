@@ -177,10 +177,10 @@ func (h *Sniffer) UDP(data []byte, reqAddr *string) error {
 
 var _ server.UDPStreamHook = (*Sniffer)(nil)
 
-// UDPStream implements server.UDPStreamHook. It opens a stateful sniffing
+// OpenUDPStream implements server.UDPStreamHook. It opens a stateful sniffing
 // session that reassembles the QUIC ClientHello from possibly multiple
 // Initial packets spread across multiple datagrams.
-func (h *Sniffer) UDPStream(firstData []byte, reqAddr *string) (server.UDPsniffSession, bool) {
+func (h *Sniffer) OpenUDPStream(firstData []byte, reqAddr string) server.UDPsniffSession {
 	timeout := h.Timeout
 	if timeout == 0 {
 		timeout = sniffDefaultTimeout
@@ -188,11 +188,11 @@ func (h *Sniffer) UDPStream(firstData []byte, reqAddr *string) (server.UDPsniffS
 	s := &udpSniffSession{
 		r:        quicInternal.NewClientHelloReassembler(),
 		deadline: time.Now().Add(timeout),
-		reqAddr:  *reqAddr,
-		addr:     *reqAddr, // valid before the decision: the original address
+		reqAddr:  reqAddr,
+		addr:     reqAddr, // valid before the decision: the original address
 	}
 	s.Feed(firstData)
-	return s, s.done
+	return s
 }
 
 // udpSniffSession is a stateful UDP sniffing session that reassembles the
