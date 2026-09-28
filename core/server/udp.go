@@ -63,10 +63,11 @@ type udpSessionEntry struct {
 
 	aclCache map[string]error
 
-	sniffSession UDPsniffSession          // non-nil while sniffing is in progress
-	pending      []*protocol.UDPMessage // messages buffered during sniffing
-	pendingBytes int                    // total size of the buffered datagrams
-	sniffDeadline time.Time             // when to give up sniffing this session
+	sniffSession  UDPsniffSession         // non-nil while sniffing is in progress
+	pending       []*protocol.UDPMessage  // messages buffered during sniffing
+	pendingBytes  int                     // total size of the buffered datagrams
+	sniffDeadline time.Time               // when to give up sniffing this session
+	sniffDecided  bool                    // set once the sniffing decision is made (dial skips the one-shot hook)
 }
 
 func newUDPSessionEntry(
@@ -150,6 +151,7 @@ func (e *udpSessionEntry) Feed(msg *protocol.UDPMessage) (int, error) {
 				if sess.Done() {
 					// The sniffing decision is already final (e.g. the whole
 					// ClientHello fit into this datagram): dial immediately.
+					e.sniffDecided = true
 					firstMsg := *dfMsg
 					firstMsg.Addr = sess.Addr()
 					e.applySniffedAddr(dfMsg.Addr, firstMsg.Addr)
@@ -186,6 +188,7 @@ func (e *udpSessionEntry) Feed(msg *protocol.UDPMessage) (int, error) {
 func (e *udpSessionEntry) decideAndFlush() (int, error) {
 	addr := e.sniffSession.Addr()
 	e.sniffSession = nil
+	e.sniffDecided = true
 	firstMsg := *e.pending[0]
 	originalAddr := firstMsg.Addr
 	firstMsg.Addr = addr
@@ -424,16 +427,23 @@ func (m *udpSessionManager) feed(msg *protocol.UDPMessage) {
 	// Create a new session if not exists
 	if entry == nil {
 		dialFunc := func(addr string, firstMsgData []byte) (conn UDPConn, actualAddr string, err error) {
-			// Call the hook
-			err = m.io.Hook(firstMsgData, &addr)
-			if err != nil {
-				return conn, actualAddr, err
+			if entry.sniffDecided {
+				// The stateful sniffer already made the routing decision for
+				// this session (see UDPStreamHook) — running the one-shot
+				// hook again would just repeat the same decryption.
+				actualAddr = addr
+			} else {
+				// Call the hook
+				err = m.io.Hook(firstMsgData, &addr)
+				if err != nil {
+					return conn, actualAddr, err
+				}
+				actualAddr = addr
 			}
-			actualAddr = addr
 			// Log the event
-			m.eventLogger.New(msg.SessionID, addr)
+			m.eventLogger.New(msg.SessionID, actualAddr)
 			// Dial target
-			conn, err = m.io.UDP(addr)
+			conn, err = m.io.UDP(actualAddr)
 			return conn, actualAddr, err
 		}
 		exitFunc := func(err error) {
